@@ -1,0 +1,196 @@
+#include <windows.h>
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <sstream>
+#include <chrono>
+#include <iomanip>
+
+using namespace std;
+
+// 현재 PC 시간 문자열 만들기
+string getCurrentTime()
+{
+    auto now = chrono::system_clock::now();
+    time_t nowTime = chrono::system_clock::to_time_t(now);
+
+    tm localTime;
+    localtime_s(&localTime, &nowTime);
+
+    stringstream ss;
+    ss << put_time(&localTime, "%Y-%m-%d %H:%M:%S");
+
+    return ss.str();
+}
+
+int main()
+{
+    // COM6 열기
+    HANDLE hSerial = CreateFileA(
+        "\\\\.\\COM6",
+        GENERIC_READ,
+        0,
+        NULL,
+        OPEN_EXISTING,
+        0,
+        NULL
+    );
+
+    if (hSerial == INVALID_HANDLE_VALUE)
+    {
+        cout << "COM6 OPEN FAILED" << endl;
+        return 1;
+    }
+
+    // 시리얼 설정
+    DCB dcbSerialParams = { 0 };
+    dcbSerialParams.DCBlength = sizeof(dcbSerialParams);
+
+    if (!GetCommState(hSerial, &dcbSerialParams))
+    {
+        cout << "GetCommState FAILED" << endl;
+        CloseHandle(hSerial);
+        return 1;
+    }
+
+    dcbSerialParams.BaudRate = CBR_9600;
+    dcbSerialParams.ByteSize = 8;
+    dcbSerialParams.StopBits = ONESTOPBIT;
+    dcbSerialParams.Parity = NOPARITY;
+
+    if (!SetCommState(hSerial, &dcbSerialParams))
+    {
+        cout << "SetCommState FAILED" << endl;
+        CloseHandle(hSerial);
+        return 1;
+    }
+
+    // 타임아웃 설정
+    COMMTIMEOUTS timeouts = { 0 };
+
+    timeouts.ReadIntervalTimeout = 50;
+    timeouts.ReadTotalTimeoutConstant = 50;
+    timeouts.ReadTotalTimeoutMultiplier = 10;
+
+    SetCommTimeouts(hSerial, &timeouts);
+
+    // 바탕화면에 CSV 생성
+    ofstream file("C:\\Users\\user\\Desktop\\event.csv");
+
+    if (!file.is_open())
+    {
+        cout << "CSV OPEN FAILED" << endl;
+        CloseHandle(hSerial);
+        return 1;
+    }
+
+    // CSV 제목
+    file << "Event,PC_Time,Distance_cm" << endl;
+
+    char buffer[256];
+    DWORD bytesRead;
+
+    string line = "";
+
+    // 이미 5cm 안에 들어와 있는지 기억
+    bool detected = false;
+
+    cout << "5cm detection monitoring..." << endl;
+
+    while (true)
+    {
+        if (ReadFile(
+            hSerial,
+            buffer,
+            sizeof(buffer) - 1,
+            &bytesRead,
+            NULL))
+        {
+            if (bytesRead > 0)
+            {
+                buffer[bytesRead] = '\0';
+
+                for (DWORD i = 0; i < bytesRead; i++)
+                {
+                    char c = buffer[i];
+
+                    // 한 줄 수신 완료
+                    if (c == '\n')
+                    {
+                        // No Echo 처리
+                        if (line == "No Echo")
+                        {
+                            cout << "No Echo" << endl;
+                            line.clear();
+                        }
+                        else
+                        {
+                            try
+                            {
+                                // 문자열 → 실수
+                                float distance = stof(line);
+
+                                cout << "Distance: "
+                                    << distance
+                                    << " cm"
+                                    << endl;
+
+                                // 5cm 이하로 처음 들어온 순간
+                                if (distance <= 5.0 && !detected)
+                                {
+                                    detected = true;
+
+                                    string pcTime = getCurrentTime();
+
+                                    cout << "*** DETECTED ***" << endl;
+                                    cout << "Time: "
+                                        << pcTime
+                                        << endl;
+
+                                    cout << "Distance: "
+                                        << distance
+                                        << " cm"
+                                        << endl;
+
+                                    // CSV 저장
+                                    file << "DETECTED,"
+                                        << pcTime << ","
+                                        << distance
+                                        << endl;
+
+                                    file.flush();
+                                }
+
+                                // 다시 5cm 밖으로 나가면
+                                // 다음 이벤트 감지 가능
+                                if (distance > 5.0)
+                                {
+                                    detected = false;
+                                }
+                            }
+                            catch (...)
+                            {
+                                cout << "DATA ERROR: "
+                                    << line
+                                    << endl;
+                            }
+
+                            line.clear();
+                        }
+                    }
+
+                    // \r은 무시하고 나머지 문자는 누적
+                    else if (c != '\r')
+                    {
+                        line += c;
+                    }
+                }
+            }
+        }
+    }
+
+    file.close();
+    CloseHandle(hSerial);
+
+    return 0;
+}
